@@ -1,0 +1,26 @@
+services:
+    app:
+        build: .
+        container_name: axis_pay_wallet_app
+        restart: unless-stopped
+        ports:
+            - '3000:3000'
+        environment:
+            - MONGODB_URI=mongodb+srv://axis_pay:<db_password>@axispay.3okudiu.mongodb.net/
+            - MONGODB_PASS=axis_pay
+            - PORT=3000
+            - JWT_SECRET=axis-pay-secure-jwt-secret-key
+        volumes:
+            # handle hot reloading
+            - ./src:/app/src
+            - ./package.json:/app/package.json
+            - ./package-lock.json:/app/package-lock.json
+            - ./tsconfig.json:/app/tsconfig.json
+            - /app/node_modules
+        networks:
+            - axis_pay_network
+        command: npm run dev
+
+networks:
+    axis_pay_network:
+        driver: bridge
