@@ -1,9 +1,10 @@
 import { getDb, getClient } from '../db';
 import { Account } from '../models/Account';
 import { Transaction, TransactionType, TransactionStatus } from '../models/Transaction';
-import { Collection } from 'mongodb';
+import { Collection, ClientSession } from 'mongodb';
 import { v4 as uuidv4 } from 'uuid';
 import { OperationalError } from '../middlewares/error';
+
 const getAccountCollection = (): Collection<Account> => getDb().collection<Account>('accounts');
 const getTransactionCollection = (): Collection<Transaction> =>
     getDb().collection<Transaction>('transactions');
@@ -43,7 +44,8 @@ async function recordTransaction(
     accountId: string,
     amount: number,
     type: TransactionType,
-    description?: string
+    description?: string,
+    session?: ClientSession
 ): Promise<string> {
     const transactionId = uuidv4();
     const transaction: Transaction = {
@@ -56,72 +58,80 @@ async function recordTransaction(
         createdAt: new Date(),
     };
 
-    await getTransactionCollection().insertOne(transaction);
+    const options = session ? { session } : {};
+    await getTransactionCollection().insertOne(transaction, options);
     return transactionId;
 }
-
 
 export async function depositFunds(
     accountId: string,
     amount: number,
     description?: string
 ): Promise<string> {
+    const client = getClient();
+    const session = client.startSession();
+
     try {
-        const accountsCollection = getAccountCollection();
-        const account = await accountsCollection.findOne({ nationalId: accountId });
+        let transactionId: string;
 
-        if (!account) {
-            throw OperationalError.notFound('Account');
-        }
+        await session.withTransaction(async () => {
+            const accountsCollection = getAccountCollection();
+            const transactionsCollection = getTransactionCollection();
 
-        const transactionId = uuidv4();
-        const transaction: Transaction = {
-            transactionId,
-            accountId,
-            type: TransactionType.DEPOSIT,
-            amount,
-            description: description || 'Deposit',
-            status: TransactionStatus.PENDING,
-            createdAt: new Date(),
-        };
+             const account = await accountsCollection.findOne(
+                { nationalId: accountId },
+                { session }
+            );
 
-        await getTransactionCollection().insertOne(transaction);
+            if (!account) {
+                throw OperationalError.notFound('Account');
+            }
 
-        try {
-            const updateResult = await accountsCollection.updateOne(
+             transactionId = uuidv4();
+            const transaction: Transaction = {
+                transactionId,
+                accountId,
+                type: TransactionType.DEPOSIT,
+                amount,
+                description: description || 'Deposit',
+                status: TransactionStatus.PENDING,
+                createdAt: new Date(),
+            };
+
+            await transactionsCollection.insertOne(transaction, { session });
+
+             const updateResult = await accountsCollection.updateOne(
                 { nationalId: accountId },
                 {
                     $inc: { balance: amount },
                     $set: { updatedAt: new Date() },
-                }
+                },
+                { session }
             );
 
             if (updateResult.matchedCount === 0) {
-                await getTransactionCollection().updateOne(
-                    { transactionId },
-                    { $set: { status: TransactionStatus.FAILED } }
-                );
                 throw OperationalError.notFound('Account');
             }
 
-            await getTransactionCollection().updateOne(
+             await transactionsCollection.updateOne(
                 { transactionId },
-                { $set: { status: TransactionStatus.COMPLETED } }
+                { $set: { status: TransactionStatus.COMPLETED } },
+                { session }
             );
+        }, {
+            readConcern: { level: 'majority' },
+            writeConcern: { w: 'majority' },
+            readPreference: 'primary'
+        });
 
-            return transactionId;
-        } catch (error) {
-            await getTransactionCollection().updateOne(
-                { transactionId },
-                { $set: { status: TransactionStatus.FAILED } }
-            );
-            throw error;
-        }
+        return transactionId!;
     } catch (error) {
         if (error instanceof Error) {
             throw error;
         }
         throw OperationalError.internal('Failed to deposit funds.');
+    } finally {
+        await session.endSession();
     }
 }
 
@@ -130,32 +140,42 @@ export async function withdrawFunds(
     amount: number,
     description?: string
 ): Promise<string> {
+    const client = getClient();
+    const session = client.startSession();
+
     try {
-        const accountsCollection = getAccountCollection();
-        const account = await accountsCollection.findOne({ nationalId: accountId });
+        let transactionId: string;
 
-        if (!account) {
-            throw OperationalError.notFound('Account');
-        }
+        await session.withTransaction(async () => {
+            const accountsCollection = getAccountCollection();
+            const transactionsCollection = getTransactionCollection();
 
-        if (account.balance < amount) {
-            throw OperationalError.insufficientFunds();
-        }
+             const account = await accountsCollection.findOne(
+                { nationalId: accountId },
+                { session }
+            );
 
-        const transactionId = uuidv4();
-        const transaction: Transaction = {
-            transactionId,
-            accountId,
-            type: TransactionType.WITHDRAWAL,
-            amount,
-            description: description || 'Withdrawal',
-            status: TransactionStatus.PENDING,
-            createdAt: new Date(),
-        };
+            if (!account) {
+                throw OperationalError.notFound('Account');
+            }
 
-        await getTransactionCollection().insertOne(transaction);
+            if (account.balance < amount) {
+                throw OperationalError.insufficientFunds();
+            }
 
-        try {
+             transactionId = uuidv4();
+            const transaction: Transaction = {
+                transactionId,
+                accountId,
+                type: TransactionType.WITHDRAWAL,
+                amount,
+                description: description || 'Withdrawal',
+                status: TransactionStatus.PENDING,
+                createdAt: new Date(),
+            };
+
+            await transactionsCollection.insertOne(transaction, { session });
+
             const updateResult = await accountsCollection.updateOne(
                 {
                     nationalId: accountId,
@@ -164,16 +184,16 @@ export async function withdrawFunds(
                 {
                     $inc: { balance: -amount },
                     $set: { updatedAt: new Date() },
-                }
+                },
+                { session }
             );
 
             if (updateResult.matchedCount === 0) {
-                await getTransactionCollection().updateOne(
-                    { transactionId },
-                    { $set: { status: TransactionStatus.FAILED } }
+                const currentAccount = await accountsCollection.findOne(
+                    { nationalId: accountId },
+                    { session }
                 );
-
-                const currentAccount = await accountsCollection.findOne({ nationalId: accountId });
+                
                 if (!currentAccount) {
                     throw OperationalError.notFound('Account');
                 } else if (currentAccount.balance < amount) {
@@ -183,24 +203,25 @@ export async function withdrawFunds(
                 }
             }
 
-            await getTransactionCollection().updateOne(
+            await transactionsCollection.updateOne(
                 { transactionId },
-                { $set: { status: TransactionStatus.COMPLETED } }
+                { $set: { status: TransactionStatus.COMPLETED } },
+                { session }
             );
+        }, {
+            readConcern: { level: 'majority' },
+            writeConcern: { w: 'majority' },
+            readPreference: 'primary'
+        });
 
-            return transactionId;
-        } catch (error) {
-            await getTransactionCollection().updateOne(
-                { transactionId },
-                { $set: { status: TransactionStatus.FAILED } }
-            );
-            throw error;
-        }
+        return transactionId!;
     } catch (error) {
         if (error instanceof Error) {
             throw error;
         }
         throw OperationalError.internal('Failed to withdraw funds.');
+    } finally {
+        await session.endSession();
     }
 }
 
@@ -237,3 +258,4 @@ export async function getAccountTransactions(accountId: string): Promise<Transac
     const transactionsCollection = getTransactionCollection();
     return await transactionsCollection.find({ accountId }).sort({ createdAt: -1 }).toArray();
 }
+
