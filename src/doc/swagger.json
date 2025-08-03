@@ -103,7 +103,7 @@
             "post": {
                 "tags": ["Authentication"],
                 "summary": "Authenticate user",
-                "description": "Authenticates a user with National ID and password, returns JWT token",
+                "description": "Authenticates a user with Mobile Number and password, returns JWT token",
                 "requestBody": {
                     "required": true,
                     "content": {
@@ -1061,13 +1061,13 @@
             },
             "LoginRequest": {
                 "type": "object",
-                "required": ["nationalId", "password"],
+                "required": ["mobileNumber", "password"],
                 "properties": {
-                    "nationalId": {
+                    "mobileNumber": {
                         "type": "string",
-                        "description": "Egyptian National ID (14 digits)",
-                        "pattern": "^([2-3])([0-9]{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])([0-9]{7})$",
-                        "example": "30111111111110"
+                        "description": "Egyptian mobile number",
+                        "pattern": "^01(0|1|2|5){1}[0-9]{8}$",
+                        "example": "01012345670"
                     },
                     "password": {
                         "type": "string",
